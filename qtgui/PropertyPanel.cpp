@@ -411,6 +411,8 @@ QWidget* PropertyPanel::onglet_dataset() {
 
     btn_stop_ = new QPushButton("\u23F9 Arr\u00EAter");
     btn_stop_->setToolTip("Arrête la simulation en cours.");
+    btn_stop_->setStyleSheet(
+        "QPushButton { color: #c62828; font-weight: bold; }");
     connect(btn_stop_, &QPushButton::clicked, this, &PropertyPanel::stop_simulation);
     lay->addWidget(btn_stop_);
 

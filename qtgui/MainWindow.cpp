@@ -10,6 +10,9 @@
 #include <QLabel>
 #include <QCoreApplication>
 #include <QDir>
+#include <QInputDialog>
+#include <QFileInfo>
+#include <QMouseEvent>
 
 static QString exemples_dir(const char* sous) {
     QString dir = QCoreApplication::applicationDirPath();
@@ -27,18 +30,26 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     scene_ = new GraphScene(&reseau_, this);
     view_ = new QGraphicsView(scene_);
     view_->setRenderHint(QPainter::Antialiasing);
-    view_->setDragMode(QGraphicsView::ScrollHandDrag);
+    view_->setDragMode(QGraphicsView::RubberBandDrag);
     view_->setViewportUpdateMode(QGraphicsView::MinimalViewportUpdate);
+    view_->viewport()->installEventFilter(this);
+    view_->setMouseTracking(true);
 
     panel_ = new PropertyPanel;
     panel_->afficher_dataset(&dataset_);
 
+    palette_ = new ComponentPalette;
+    palette_->setMinimumWidth(160);
+    palette_->setMaximumWidth(220);
+
     auto* splitter = new QSplitter;
+    splitter->addWidget(palette_);
     splitter->addWidget(view_);
     splitter->addWidget(panel_);
-    splitter->setSizes({900, 300}); // 75% / 25%
-    splitter->setStretchFactor(0, 3);
+    splitter->setSizes({180, 720, 300});
+    splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
+    splitter->setStretchFactor(2, 0);
     setCentralWidget(splitter);
 
     connect(scene_, &GraphScene::neurone_selectionne, this, &MainWindow::on_neurone_selectionne);
@@ -47,6 +58,24 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(panel_, &PropertyPanel::neurone_modifie, this, &MainWindow::on_neurone_modifie);
     connect(panel_, &PropertyPanel::synapse_modifie, this, &MainWindow::on_synapse_modifie);
     connect(panel_, &PropertyPanel::stop_simulation, this, &MainWindow::arreter_simulation);
+
+    scene_->set_dataset(&dataset_);
+    connect(scene_, &GraphScene::scene_reconstruite, this, [this]() {
+        if (!dataset_.exemples.empty())
+            scene_->sync_colonnes_dataset(dataset_);
+    });
+    connect(scene_, &GraphScene::mapping_colonne_change, this, [this](int id, bool entree, int col) {
+        auto* n = reseau_.trouver_neurone(id);
+        if (!n) return;
+        if (entree)  n->colonne_entree = col;
+        else         n->colonne_sortie = col;
+        scene_->sync_colonnes_dataset(dataset_);
+    });
+    connect(palette_, &ComponentPalette::component_selected, this, [this](const QVariantMap& data) {
+        scene_->set_placement_mode(data);
+    });
+    connect(scene_, &GraphScene::component_place, this, &MainWindow::on_component_place);
+    connect(scene_, &GraphScene::exporter_selection, this, &MainWindow::exporter_selection_module);
 
     // Menu
     auto* mf = menuBar()->addMenu("&Fichier");
@@ -71,6 +100,17 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* a_q = mf->addAction("Quitter");
     a_q->setShortcut(QKeySequence::Quit);
     connect(a_q, &QAction::triggered, this, &QWidget::close);
+    mf->addSeparator();
+    auto* a_im = mf->addAction("📦 Importer un module...");
+    connect(a_im, &QAction::triggered, this, [this]() {
+        QString p = QFileDialog::getOpenFileName(this, "Importer un module",
+            exemples_dir("modules"), "Module (*.neuron *.json);;Tous (*)");
+        if (p.isEmpty()) return;
+        QString mod_dir = exemples_dir("modules");
+        QDir().mkpath(mod_dir);
+        QFile::copy(p, mod_dir + "/" + QFileInfo(p).fileName());
+        palette_->scanner_modules(mod_dir);
+    });
 
     auto* ms = menuBar()->addMenu("&Simulation");
     auto* a_sim = ms->addAction("\u25B6 Lancer la simulation (F5)");
@@ -93,6 +133,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     auto* a_tb_sim = tb->addAction("\u25B6 Simuler (F5)");
     connect(a_tb_sim, &QAction::triggered, this, &MainWindow::simuler);
+    auto* tb_sim_w = tb->widgetForAction(a_tb_sim);
+    if (tb_sim_w) tb_sim_w->setStyleSheet(
+        "QToolButton { color: #2e7d32; font-weight: bold; }");
 
     tb->addSeparator();
 
@@ -130,6 +173,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     scene_->reconstruire();
     mettre_a_jour_status();
+
+    // Scan existing modules
+    QString mod_dir = exemples_dir("modules");
+    QDir().mkpath(mod_dir);
+    palette_->scanner_modules(mod_dir);
 }
 
 void MainWindow::on_neurone_selectionne(int id) {
@@ -170,6 +218,7 @@ void MainWindow::simuler() {
 }
 
 void MainWindow::demarrer_simulation() {
+    stop_demande_ = false;
     epoch_actuel_ = 0;
     meilleure_erreur_ = 1e10f;
     panel_->reinitialiser_apprentissage();
@@ -189,6 +238,7 @@ void MainWindow::on_tick_simulation() {
     float erreur = 0.0f;
     bool fini = false;
     for (int i = 0; i < batch; ++i) {
+        if (stop_demande_) { fini = true; break; }
         if (epoch_actuel_ >= spin_epochs_->value()) { fini = true; break; }
         erreur = reseau_.simuler_un_epoch(dataset_, 1.0f, true);
         ++epoch_actuel_;
@@ -197,15 +247,20 @@ void MainWindow::on_tick_simulation() {
         if (erreur < panel_->seuil_arret()) { fini = true; break; }
     }
 
-    scene_->mettre_a_jour_poids();
-    scene_->sync_sorties_depuis_reseau();
-    panel_->ajouter_point_erreur(epoch_actuel_, erreur);
-    panel_->set_meilleure_erreur(meilleure_erreur_);
-    auto sorties = reseau_.calculer_sorties(dataset_, 1.0f);
-    panel_->mettre_a_jour_sorties_dataset(sorties);
+    if (!stop_demande_) {
+        scene_->mettre_a_jour_poids();
+        scene_->sync_sorties_depuis_reseau();
+        panel_->ajouter_point_erreur(epoch_actuel_, erreur);
+        panel_->set_meilleure_erreur(meilleure_erreur_);
+        auto sorties = reseau_.calculer_sorties(dataset_, 1.0f);
+        panel_->mettre_a_jour_sorties_dataset(sorties);
+    }
 
     if (!fini) return;
-    if (epoch_actuel_ >= spin_epochs_->value())
+    if (stop_demande_)
+        statusBar()->showMessage(QString("Arrêté (%1 itérations, err=%2)")
+            .arg(epoch_actuel_).arg(meilleure_erreur_, 0, 'f', 5));
+    else if (epoch_actuel_ >= spin_epochs_->value())
         statusBar()->showMessage(QString("Terminé (%1 itérations, err=%2)")
             .arg(epoch_actuel_).arg(meilleure_erreur_, 0, 'f', 5));
     else
@@ -214,8 +269,10 @@ void MainWindow::on_tick_simulation() {
 }
 
 void MainWindow::arreter_simulation() {
+    stop_demande_ = true;
     if (timer_simulation_) timer_simulation_->stop();
-    if (!statusBar()->currentMessage().startsWith("Terminé")
+    if (!statusBar()->currentMessage().startsWith("Arrêté")
+        && !statusBar()->currentMessage().startsWith("Terminé")
         && !statusBar()->currentMessage().startsWith("Seuil"))
         statusBar()->showMessage(
             QString("%1 itérations × %2 exemples. Meilleure erreur: %3")
@@ -263,6 +320,7 @@ void MainWindow::charger_dataset() {
         dataset_.nb_entrees = ni;
 
     panel_->afficher_dataset(&dataset_);
+    scene_->sync_colonnes_dataset(dataset_);
     mettre_a_jour_status();
 }
 
@@ -279,12 +337,98 @@ void MainWindow::reinitialiser() {
 void MainWindow::mettre_a_jour_status() {
     QString msg = reseau_.resume();
     msg += "  |  " + dataset_.resume().replace('\n', ' ');
+
+    // Window title with filenames
+    QString titre = "Éditeur de Réseau de Neurones Biologiques";
+    if (!reseau_.chemin_fichier.isEmpty())
+        titre = QFileInfo(reseau_.chemin_fichier).fileName() + " — " + titre;
+    if (!dataset_.chemin_fichier.isEmpty())
+        titre = QFileInfo(dataset_.chemin_fichier).fileName() + " — " + titre;
+    setWindowTitle(titre);
     auto sel = scene_->selectedItems();
-    if (!sel.isEmpty()) {
+    if (scene_->est_en_placement())
+        msg += "  |  Mode placement actif (clic sur la scène)";
+    else if (!sel.isEmpty()) {
         if (auto* n = dynamic_cast<NeuroneNode*>(sel.first()))
             msg += QString("  |  Sélection: #%1").arg(n->neurone_id());
         else if (auto* e = dynamic_cast<SynapseEdge*>(sel.first()))
             msg += QString("  |  Synapse #%1").arg(e->synapse_id());
     }
     statusBar()->showMessage(msg);
+}
+
+void MainWindow::on_component_place(const QVariantMap& data, QPointF pos) {
+    QString type = data.value("type").toString();
+    if (type == "neurone_entree") {
+        reseau_.ajouter_neurone(
+            QString("e%1").arg(reseau_.ids_entree().size() + 1),
+            pos.x(), pos.y(), true);
+    } else if (type == "neurone_cache") {
+        reseau_.ajouter_neurone(
+            QString("n%1").arg(reseau_.neurones.size()),
+            pos.x(), pos.y(), false);
+    } else if (type == "neurone_sortie") {
+        reseau_.ajouter_neurone(
+            QString("s%1").arg(reseau_.neurones.size()),
+            pos.x(), pos.y(), false);
+    } else if (type == "module") {
+        QString fichier = data.value("fichier").toString();
+        if (!fichier.isEmpty())
+            reseau_.importer_module(fichier, pos);
+    }
+    scene_->reconstruire();
+    mettre_a_jour_status();
+}
+
+void MainWindow::exporter_selection_module() {
+    auto items = scene_->selectedItems();
+    if (items.isEmpty()) return;
+
+    std::vector<int> ids_n, ids_s;
+    for (auto* item : items) {
+        if (auto* n = dynamic_cast<NeuroneNode*>(item))
+            ids_n.push_back(n->neurone_id());
+        else if (auto* e = dynamic_cast<SynapseEdge*>(item))
+            ids_s.push_back(e->synapse_id());
+    }
+
+    QString nom = QInputDialog::getText(this, "Exporter le module",
+        "Nom du module :", QLineEdit::Normal, "mon_module");
+    if (nom.isEmpty()) return;
+
+    QString mod_dir = exemples_dir("modules");
+    QDir().mkpath(mod_dir);
+    QString chemin = mod_dir + "/" + nom + ".neuron";
+    if (reseau_.exporter_module(chemin, ids_n, ids_s)) {
+        palette_->scanner_modules(mod_dir);
+        statusBar()->showMessage(QString("Module exporté : %1").arg(chemin));
+    } else {
+        QMessageBox::warning(this, "Erreur", "Impossible d'exporter le module.");
+    }
+}
+
+bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
+    if (event->type() == QEvent::MouseButtonPress) {
+        auto* me = static_cast<QMouseEvent*>(event);
+        if (me->button() == Qt::MiddleButton) {
+            view_->setDragMode(QGraphicsView::ScrollHandDrag);
+            // Synthesize left press to start scroll
+            QMouseEvent fake(QEvent::MouseButtonPress, me->position(), me->globalPosition(),
+                             Qt::LeftButton, Qt::LeftButton, me->modifiers());
+            QCoreApplication::sendEvent(view_->viewport(), &fake);
+            return true;
+        }
+    }
+    if (event->type() == QEvent::MouseButtonRelease) {
+        auto* me = static_cast<QMouseEvent*>(event);
+        if (me->button() == Qt::MiddleButton) {
+            // Synthesize left release to end scroll
+            QMouseEvent fake(QEvent::MouseButtonRelease, me->position(), me->globalPosition(),
+                             Qt::LeftButton, Qt::LeftButton, me->modifiers());
+            QCoreApplication::sendEvent(view_->viewport(), &fake);
+            view_->setDragMode(QGraphicsView::RubberBandDrag);
+            return true;
+        }
+    }
+    return QMainWindow::eventFilter(obj, event);
 }

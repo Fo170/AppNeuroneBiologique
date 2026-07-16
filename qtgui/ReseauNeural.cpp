@@ -2,6 +2,9 @@
 #include <QFile>
 #include <QTextStream>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 #include <map>
 #include <cmath>
 #include <algorithm>
@@ -17,6 +20,18 @@ NeuroneInfo* ReseauNeural::trouver_neurone(int id) {
 const NeuroneInfo* ReseauNeural::trouver_neurone(int id) const {
     for (const auto& n : neurones)
         if (n.id == id) return &n;
+    return nullptr;
+}
+
+SynapseInfo* ReseauNeural::trouver_synapse(int id) {
+    for (auto& s : synapses)
+        if (s.id == id) return &s;
+    return nullptr;
+}
+
+const SynapseInfo* ReseauNeural::trouver_synapse(int id) const {
+    for (const auto& s : synapses)
+        if (s.id == id) return &s;
     return nullptr;
 }
 
@@ -94,9 +109,11 @@ void ReseauNeural::simuler_pas(const std::vector<float>& entrees,
                                 const std::vector<float>& cibles,
                                 float dt_ms, bool mode_apprentissage) {
     auto ids_ent = ids_entree();
-    for (size_t i = 0; i < ids_ent.size() && i < entrees.size(); ++i) {
+    for (size_t i = 0; i < ids_ent.size(); ++i) {
         auto* n = trouver_neurone(ids_ent[i]);
-        if (n) n->sortie = entrees[i];
+        if (!n) continue;
+        int col = (n->colonne_entree >= 0) ? n->colonne_entree : (int)i;
+        n->sortie = (col < (int)entrees.size()) ? entrees[col] : 0.0f;
     }
 
     for (auto& n : neurones) {
@@ -126,7 +143,8 @@ void ReseauNeural::simuler_pas(const std::vector<float>& entrees,
         for (size_t k = 0; k < ids_s.size(); ++k) {
             auto* n = trouver_neurone(ids_s[k]);
             if (!n) continue;
-            float cible = (k < cibles.size()) ? cibles[k] : 0.0f;
+            int col = (n->colonne_sortie >= 0) ? n->colonne_sortie : (int)k;
+            float cible = (col < (int)cibles.size()) ? cibles[col] : 0.0f;
             deltas[n->id] = n->eta * (cible - n->sortie);
         }
         for (auto& n : neurones) {
@@ -200,7 +218,8 @@ float ReseauNeural::simuler_un_epoch(const Dataset& dataset, float dt_ms, bool a
         for (size_t k = 0; k < ids_s.size(); ++k) {
             auto* n = trouver_neurone(ids_s[k]);
             if (!n) continue;
-            float cible = (k < ex.cibles.size()) ? ex.cibles[k] : 0.0f;
+            int col = (n->colonne_sortie >= 0) ? n->colonne_sortie : (int)k;
+            float cible = (col < (int)ex.cibles.size()) ? ex.cibles[col] : 0.0f;
             erreur_total += std::abs(n->sortie - cible);
             ++denom;
         }
@@ -232,6 +251,125 @@ void ReseauNeural::simuler_dataset(const Dataset& dataset, float dt_ms,
     }
 }
 
+bool ReseauNeural::exporter_module(const QString& chemin,
+                                    const std::vector<int>& ids_neurones,
+                                    const std::vector<int>& ids_synapses) const {
+    QJsonObject module;
+    module["type"] = "module";
+    module["nom"] = QFileInfo(chemin).baseName();
+
+    QJsonArray arr_n;
+    float min_x = 1e9f, min_y = 1e9f;
+    for (int id : ids_neurones) {
+        auto* n = trouver_neurone(id);
+        if (!n) continue;
+        if (n->pos_x < min_x) min_x = n->pos_x;
+        if (n->pos_y < min_y) min_y = n->pos_y;
+    }
+    for (int id : ids_neurones) {
+        auto* n = trouver_neurone(id);
+        if (!n) continue;
+        QJsonObject no;
+        no["nom"] = n->nom;
+        no["V_rest"] = n->V_rest;
+        no["tau"] = n->tau;
+        no["biais"] = n->biais;
+        no["refractaire_ms"] = n->refractaire_ms;
+        no["eta"] = n->eta;
+        no["oubli_lent"] = n->oubli_lent;
+        no["est_entree"] = n->est_entree;
+        no["pos_x"] = n->pos_x - min_x;
+        no["pos_y"] = n->pos_y - min_y;
+        arr_n.append(no);
+    }
+    module["neurones"] = arr_n;
+
+    QJsonArray arr_s;
+    for (int id : ids_synapses) {
+        auto* s = trouver_synapse(id);
+        if (!s) continue;
+        // Only include synapses whose source AND target are in the export
+        bool src_ok = std::find(ids_neurones.begin(), ids_neurones.end(), s->source_id) != ids_neurones.end();
+        bool dst_ok = std::find(ids_neurones.begin(), ids_neurones.end(), s->target_id) != ids_neurones.end();
+        if (!src_ok || !dst_ok) continue;
+        QJsonObject so;
+        so["source_id"] = s->source_id;
+        so["target_id"] = s->target_id;
+        so["poids"] = s->poids;
+        so["type"] = static_cast<int>(s->type);
+        arr_s.append(so);
+    }
+    module["synapses"] = arr_s;
+
+    QFile f(chemin);
+    if (!f.open(QIODevice::WriteOnly)) return false;
+    f.write(QJsonDocument(module).toJson(QJsonDocument::Indented));
+    return true;
+}
+
+bool ReseauNeural::importer_module(const QString& chemin, QPointF decalage) {
+    QFile f(chemin);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+    f.close();
+    if (!doc.isObject()) return false;
+    QJsonObject obj = doc.object();
+    if (obj.value("type").toString() != "module") return false;
+
+    QJsonArray arr_n = obj.value("neurones").toArray();
+    QJsonArray arr_s = obj.value("synapses").toArray();
+    if (arr_n.isEmpty()) return false;
+
+    // Add neurons and build ID map
+    std::map<int, int> id_map;
+    for (const auto& val : arr_n) {
+        QJsonObject no = val.toObject();
+        int old_id = -1;
+        // Reconstruct old IDs from indices in the array
+        NeuroneInfo ninfo;
+        ninfo.nom = no.value("nom").toString();
+        ninfo.V_rest = no.value("V_rest").toDouble();
+        ninfo.tau = no.value("tau").toDouble();
+        ninfo.biais = no.value("biais").toDouble();
+        ninfo.refractaire_ms = no.value("refractaire_ms").toDouble();
+        ninfo.eta = no.value("eta").toDouble();
+        ninfo.oubli_lent = no.value("oubli_lent").toDouble();
+        ninfo.est_entree = no.value("est_entree").toBool();
+        ninfo.pos_x = no.value("pos_x").toDouble() + decalage.x();
+        ninfo.pos_y = no.value("pos_y").toDouble() + decalage.y();
+        ninfo.id = prochain_id_neurone++;
+        neurones.push_back(ninfo);
+        id_map[old_id] = ninfo.id;
+    }
+
+    // Rebuild ID map from array index
+    // The old IDs are determined by the position in the array (0, 1, 2, ...)
+    id_map.clear();
+    int base_id = prochain_id_neurone - arr_n.size();
+    for (int i = 0; i < arr_n.size(); ++i)
+        id_map[i] = base_id + i;
+
+    // Add synapses
+    for (const auto& val : arr_s) {
+        QJsonObject so = val.toObject();
+        int old_src = so.value("source_id").toInt();
+        int old_dst = so.value("target_id").toInt();
+        auto it_src = id_map.find(old_src);
+        auto it_dst = id_map.find(old_dst);
+        if (it_src == id_map.end() || it_dst == id_map.end()) continue;
+
+        SynapseInfo sinfo;
+        sinfo.id = prochain_id_synapse++;
+        sinfo.source_id = it_src->second;
+        sinfo.target_id = it_dst->second;
+        sinfo.poids = so.value("poids").toDouble(0.5);
+        sinfo.type = static_cast<TypeSynapse>(so.value("type").toInt(0));
+        synapses.push_back(sinfo);
+    }
+
+    return true;
+}
+
 std::vector<std::vector<float>> ReseauNeural::calculer_sorties(const Dataset& dataset, float dt_ms) {
     std::vector<std::vector<float>> resultats;
     for (const auto& ex : dataset.exemples) {
@@ -248,17 +386,19 @@ std::vector<std::vector<float>> ReseauNeural::calculer_sorties(const Dataset& da
     return resultats;
 }
 
-void ReseauNeural::sauvegarder_csv(const QString& chemin) const {
+void ReseauNeural::sauvegarder_csv(const QString& chemin) {
+    chemin_fichier = chemin;
     QFile f(chemin);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) return;
     QTextStream out(&f);
     out << "[NEURONES]\n";
-    out << "id,nom,V_rest,tau,biais,refractaire_ms,eta,oubli,est_entree,x,y\n";
+    out << "id,nom,V_rest,tau,biais,refractaire_ms,eta,oubli,est_entree,x,y,col_entree,col_sortie\n";
     for (const auto& n : neurones) {
         out << n.id << "," << n.nom << "," << n.V_rest << "," << n.tau << ","
             << n.biais << "," << n.refractaire_ms << "," << n.eta << ","
             << n.oubli_lent << "," << (n.est_entree ? 1 : 0) << ","
-            << n.pos_x << "," << n.pos_y << "\n";
+            << n.pos_x << "," << n.pos_y << ","
+            << n.colonne_entree << "," << n.colonne_sortie << "\n";
     }
     out << "[SYNAPSES]\n";
     out << "id,source,target,poids,type\n";
@@ -283,6 +423,7 @@ static TypeSynapse type_from_string(const QString& s) {
 }
 
 void ReseauNeural::charger_csv(const QString& chemin) {
+    chemin_fichier = chemin;
     QFile f(chemin);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return;
     QTextStream in(&f);
@@ -314,6 +455,10 @@ void ReseauNeural::charger_csv(const QString& chemin) {
             n.est_entree = champs[8].toInt() != 0;
             n.pos_x = champs[9].toFloat();
             n.pos_y = champs[10].toFloat();
+            if (champs.size() >= 13) {
+                n.colonne_entree = champs[11].toInt();
+                n.colonne_sortie = champs[12].toInt();
+            }
             neurones.push_back(n);
             if (n.id >= prochain_id_neurone) prochain_id_neurone = n.id + 1;
         } else if (section == SYNAPSES && champs.size() >= 5) {
@@ -330,6 +475,10 @@ void ReseauNeural::charger_csv(const QString& chemin) {
 }
 
 QString ReseauNeural::resume() const {
-    return QString("%1 neurones, %2 synapses")
+    QString s;
+    if (!chemin_fichier.isEmpty())
+        s += QFileInfo(chemin_fichier).fileName() + " — ";
+    s += QString("%1 neurones, %2 synapses")
             .arg(neurones.size()).arg(synapses.size());
+    return s;
 }

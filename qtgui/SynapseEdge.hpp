@@ -2,6 +2,7 @@
 #define SYNAPSE_EDGE_HPP
 
 #include <QGraphicsObject>
+#include <QGraphicsSceneWheelEvent>
 #include "NeuroneNode.hpp"
 
 class SynapseEdge : public QGraphicsObject {
@@ -20,6 +21,12 @@ public:
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option,
                QWidget* widget) override;
     QPainterPath shape() const override;
+
+signals:
+    void poids_change(int synapse_id, float nouveau_poids);
+
+protected:
+    void wheelEvent(QGraphicsSceneWheelEvent* event) override;
 
 private:
     int id_;

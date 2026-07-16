@@ -10,11 +10,13 @@
 #include "Dataset.hpp"
 #include "GraphScene.hpp"
 #include "PropertyPanel.hpp"
+#include "ComponentPalette.hpp"
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget* parent = nullptr);
+    bool eventFilter(QObject* obj, QEvent* event) override;
 
 private slots:
     void on_neurone_selectionne(int id);
@@ -28,6 +30,8 @@ private slots:
     void charger_reseau();
     void charger_dataset();
     void reinitialiser();
+    void on_component_place(const QVariantMap& data, QPointF pos);
+    void exporter_selection_module();
 
 private:
     void mettre_a_jour_status();
@@ -39,10 +43,12 @@ private:
     GraphScene* scene_;
     QGraphicsView* view_;
     PropertyPanel* panel_;
+    ComponentPalette* palette_;
     QSpinBox* spin_epochs_;
     QTimer* timer_simulation_ = nullptr;
     int epoch_actuel_ = 0;
     float meilleure_erreur_ = 1e10f;
+    bool stop_demande_ = false;
 };
 
 #endif

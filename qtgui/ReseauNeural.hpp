@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <QString>
+#include <QPointF>
 #include "NeuroneBiologique.hpp"
 #include "Dataset.hpp"
 
@@ -21,6 +22,8 @@ struct NeuroneInfo {
     float V = 0.0f;
     float timer_refractaire = 0.0f;
     float sortie = 0.0f;
+    int colonne_entree = -1; // -1 = position par défaut
+    int colonne_sortie = -1; // -1 = position par défaut
 };
 
 struct SynapseInfo {
@@ -40,6 +43,8 @@ public:
 
     NeuroneInfo* trouver_neurone(int id);
     const NeuroneInfo* trouver_neurone(int id) const;
+    SynapseInfo* trouver_synapse(int id);
+    const SynapseInfo* trouver_synapse(int id) const;
 
     int ajouter_neurone(const QString& nom, float x, float y, bool entree = false);
     bool supprimer_neurone(int id);
@@ -63,9 +68,16 @@ public:
     static float sigmoide(float v);
 
     void randomiser_poids(float min = -1.0f, float max = 1.0f);
-    void sauvegarder_csv(const QString& chemin) const;
+    void sauvegarder_csv(const QString& chemin);
     void charger_csv(const QString& chemin);
     QString resume() const;
+
+    bool exporter_module(const QString& chemin,
+                         const std::vector<int>& ids_neurones,
+                         const std::vector<int>& ids_synapses) const;
+    bool importer_module(const QString& chemin, QPointF decalage);
+
+    QString chemin_fichier;
 
     std::vector<float> accum_poids_;
     std::vector<float> accum_biais_;

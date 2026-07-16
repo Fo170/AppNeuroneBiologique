@@ -16,6 +16,7 @@ add_executable(NeuroneBiologiqueGUI
     SynapseEdge.cpp
     GraphScene.cpp
     PropertyPanel.cpp
+    ComponentPalette.cpp
 )
 
 target_link_libraries(NeuroneBiologiqueGUI PRIVATE Qt6::Widgets)

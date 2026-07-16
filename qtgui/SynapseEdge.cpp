@@ -18,8 +18,8 @@ void SynapseEdge::set_poids(float p) { poids_ = p; ajuster(); update(); }
 
 void SynapseEdge::ajuster() {
     prepareGeometryChange();
-    debut_ = source_->centre();
-    fin_ = cible_->centre();
+    debut_ = source_->pin_pos(NeuroneNode::PIN_SORTIE);
+    fin_ = cible_->pin_pos(NeuroneNode::PIN_ENTREE);
     update();
 }
 
@@ -44,8 +44,22 @@ void SynapseEdge::paint(QPainter* painter, const QStyleOptionGraphicsItem*,
     double angle = std::atan2(-ligne.dy(), ligne.dx());
     float epaisseur = std::clamp(std::abs(poids_) * 3.0f, 1.0f, 6.0f);
 
-    QColor couleur = (poids_ >= 0) ? QColor(40, 120, 40) : QColor(180, 40, 40);
-    if (isSelected()) couleur = Qt::blue;
+    // Map [-5, +5] → [0, 1] → color gradient blue→gray→red
+    double v = std::clamp((poids_ + 5.0) / 10.0, 0.0, 1.0);
+    int R, G, B;
+    if (v < 0.5) {
+        double t = v * 2.0;
+        R = 40  + static_cast<int>(170 * t);
+        G = 100 + static_cast<int>(110 * t);
+        B = 200 + static_cast<int>(10  * t);
+    } else {
+        double t = (v - 0.5) * 2.0;
+        R = 210 + static_cast<int>(45  * t);
+        G = 210 - static_cast<int>(170 * t);
+        B = 210 - static_cast<int>(170 * t);
+    }
+    QColor couleur(R, G, B);
+    if (isSelected()) couleur = Qt::green;
 
     painter->setPen(QPen(couleur, epaisseur, Qt::SolidLine, Qt::RoundCap));
     painter->drawLine(ligne);
@@ -85,4 +99,16 @@ void SynapseEdge::paint(QPainter* painter, const QStyleOptionGraphicsItem*,
                              milieu.y() - tr.height()/2 - 2,
                              tr.width() + 6, tr.height() + 4),
                       Qt::AlignCenter, txt);
+}
+
+void SynapseEdge::wheelEvent(QGraphicsSceneWheelEvent* event) {
+    if (!isSelected()) {
+        QGraphicsObject::wheelEvent(event);
+        return;
+    }
+    float step = event->delta() > 0 ? 0.05f : -0.05f;
+    poids_ = std::clamp(poids_ + step, -5.0f, 5.0f);
+    update();
+    emit poids_change(id_, poids_);
+    event->accept();
 }
